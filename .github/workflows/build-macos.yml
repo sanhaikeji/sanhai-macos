@@ -117,7 +117,15 @@ jobs:
           test -x "$APP/Contents/MacOS/$APP_NAME"
           plutil -lint "$APP/Contents/Info.plist"
 
-          echo "$APP" >> "$GITHUB_OUTPUT"
+          # ⚠️ 这里**不要**写 `echo "$APP" >> "$GITHUB_OUTPUT"`。
+          #    那个步骤没有声明 `id:`，往 GITHUB_OUTPUT 写值会直接让整个 step 失败：
+          #      Unable to process file command 'output' successfully.
+          #      Invalid format '/Users/.../SanhaiMac.app'
+          #    报错信息完全看不出是 GITHUB_OUTPUT 的问题，很容易误以为是 plist 坏了。
+          #    而且这个路径根本没人消费 —— 后面的 zip / dmg 步骤都是直接用
+          #    `.build-app/SanhaiMac.app` 这个相对路径，不需要传递。
+          #    确实需要传值时才加 `id: bundle`，并写成 `steps.bundle.outputs.path`。
+          echo "bundle 就绪：$APP"
 
       - name: 压 zip
         # zip 给"手动安装"用：解压后把 .app 拖进「应用程序」就能用。
