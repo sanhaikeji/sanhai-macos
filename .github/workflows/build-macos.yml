@@ -24,6 +24,23 @@ jobs:
     # Windows runner 装不了，所以"在 Windows 上开发、云端编译"这条路必须靠 macOS runner。
     runs-on: macos-latest
 
+    # ⚠️ 这一段是必须的，不是可选的加固。
+    #
+    # 仓库的 Actions 默认权限是只读（runner 日志里会打印 `Contents: read`）。
+    # 不显式声明 `contents: write`，最后那步 action-gh-release 会直接失败：
+    #   Creating new GitHub release for tag v0.1.0...
+    #   ⚠️ GitHub release failed with status: 403
+    #   {"message":"Resource not accessible by integration"}
+    #
+    # 注意报错信息里**完全看不出是权限问题** —— "Resource not accessible by integration"
+    # 听起来像"action 没装好"或"tag 不对"，实际上是 GITHUB_TOKEN 权限不够。
+    # 这是 GitHub Actions 最容易踩的一个坑：前 8 步全绿，只有最后一步红。
+    #
+    # 只给 `contents: write`（最小权限）：够创建 release 即可，
+    # 不给 issues / pull-requests 等其它写权限。
+    permissions:
+      contents: write
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
