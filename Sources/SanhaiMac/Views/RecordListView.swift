@@ -262,8 +262,14 @@ struct RecordListView: View {
         .background(.quaternary)
     }
 
-    @ToolbarContentBuilder
-    private var listToolbar: some View {
+    /// 工具栏内容。
+    ///
+    /// ⚠️ 刻意**不**写 `@ToolbarContentBuilder`：
+    ///    那个属性生成器要求返回值满足 `ToolbarContent` 协议，
+    ///    写成 `some View` 会直接报 "requires that 'some ToolbarContent' conform to 'View'"。
+    ///    这里只有一个 `ToolbarItemGroup`，直接用 `ToolbarContentBuilder` 的求值结果即可
+    ///    ——`ToolbarItemGroup` 本身就符合 `ToolbarContent`，不需要额外的属性包装。
+    private var listToolbar: some ToolbarContent {
         ToolbarItemGroup {
             Button {
                 Task { await store.loadRecords(resetPage: true) }
@@ -340,7 +346,13 @@ struct RecordDetailView: View {
             Divider()
             picker
             Divider()
-            body(for: tab)
+            // ⚠️ 这里调用的必须是 `content(for:)`，不能是 `body`。
+            //    `body` 是 View 协议要求的无参属性，Swift 不允许写成
+            //    `body(for:)` —— 那会覆盖协议要求，报 "consecutive declarations"，
+            //    进而让 `body(for: tab)` 这一行变成"对非函数值调用"，
+            //    报出 "cannot call value of non-function type 'some View'"。
+            //    这种二阶报错很有误导性，根因在上面那一行。
+            content(for: tab)
         }
         .navigationTitle("提交 \(detail.rid)")
     }
@@ -409,8 +421,10 @@ struct RecordDetailView: View {
         .padding(.vertical, 6)
     }
 
+    /// 按当前 tab 显示对应面板。
+    /// 命名成 `content(for:)` 而不是 `body(for:)` —— 原因见调用处的注释。
     @ViewBuilder
-    private var body(for tab: Tab) -> some View {
+    private func content(for tab: Tab) -> some View {
         switch tab {
         case .code:
             if detail.code.isEmpty {

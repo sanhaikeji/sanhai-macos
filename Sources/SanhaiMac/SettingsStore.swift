@@ -18,15 +18,20 @@ import Security   // 钥匙串 API（SecItem*）在这里，Foundation 不会转
 /// 存储介质是 `UserDefaults`（系统偏好设置），不是自己写文件 ——
 /// UserDefaults 在 macOS 上自动落到 `~/Library/Preferences/<bundle-id>.plist`，
 /// 卸载应用时会一并清掉，比留一个自己写的 plist 干净。
-///
-/// 存储介质是 `UserDefaults`（系统偏好设置），不是自己写文件。
 final class AppSettings: ObservableObject {
 
     static let shared = AppSettings()
 
     /// 站点根地址。默认 SanhaiOJ。
+    ///
+    /// ⚠️ didSet 里**必须**按行分开写。写在同一行（`didSet { f() g() }`）编译器不认：
+    ///    一行里出现两个函数调用，它无法判断这是一个合法表达式还是漏了分号，
+    ///    报出来的是语法错误而不是"缺分号"，很容易看歪。
     @Published var baseURLString: String {
-        didSet { normalizeBaseURL() persist() }
+        didSet {
+            normalizeBaseURL()
+            persist()
+        }
     }
 
     /// Bearer 令牌（明文形式）。
