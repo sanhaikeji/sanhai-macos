@@ -65,12 +65,41 @@ jobs:
 
           APP_NAME="SanhaiMac"
           BUNDLE_ID="com.sanhai.mac.client"
-          # 版本号取 tag（没有 tag 就用提交号），避免每次构建都叫 1.0
-          VERSION="${GITHUB_REF_NAME:-dev}"
-          # 把非法字符换成横线，否则 Info.plist 里的 CFBundleShortVersionString 会不合规
-          SAFE_VERSION="$(echo "$VERSION" | tr -cd '[:alnum:].-')"
           BUILD_DIR="$PWD/.build-app"
           APP="$BUILD_DIR/$APP_NAME.app"
+
+          # ---- 版本号 ----
+          # ⚠️ 这是个真坑：CFBundleVersion 必须是「点分数字」（如 0.1.0），
+          #    写成分支名 "main" 的话，plist 依然能通过 plutil -lint（语法合法），
+          #    但 macOS 读它做构建号时会判为非法 —— 而报错发生在**别人机器上**，
+          #    表现成"装不上/打不开"，极难定位。所以这里自己先算好并校验。
+          #
+          # 规则：
+          #   有形如 v0.1.0 的 tag → 用tag 的数字部分
+          #   否则→ 0.0.<CI 运行号>（运行号是单调递增的，能区分每次构建）
+          REF_NAME="${GITHUB_REF_NAME:-}"
+          if [[ "$REF_NAME" =~ ^v?([0-9]+(\.[0-9]+)*)$ ]]; then
+            RAW="${BASH_REMATCH[1]}"
+          else
+            RAW="0.0.${GITHUB_RUN_NUMBER:-0}"
+          fi
+
+          # 补齐成三段。CFBundleShortVersionString 惯例是「数字.数字.数字」，
+          # 只写 0.1 有些工具链会解析失败。
+          IFS='.' read -r MAJ MIN PAT <<< "$RAW"
+          SHORT_VERSION="${MAJ:-0}.${MIN:-0}.${PAT:-0}"
+
+          # 校验：只允许点分数字，且最多三段。不合规就直接让构建失败，
+          # 绝不把一个坏版本号发出去 —— 宁可 CI 红，也不能让人拿到装不上的包。
+          if ! [[ "$SHORT_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+            echo "版本号不合规: '$SHORT_VERSION'（来自 ref='$REF_NAME'）" >&2
+            exit 1
+          fi
+
+          # 构建号与版本号保持一致。同一份源码的构建号必须一致，
+          # 否则 macOS 会把同一个 app 认成不同版本，反复要求重装。
+          BUILD_VERSION="$SHORT_VERSION"
+          echo "版本号: short=$SHORT_VERSION build=$BUILD_VERSION (ref='$REF_NAME')"
 
           rm -rf "$APP"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -92,8 +121,8 @@ jobs:
               <key>CFBundleDisplayName</key>           <string>SanhaiOJ 客户端</string>
               <key>CFBundleExecutable</key>            <string>$APP_NAME</string>
               <key>CFBundleIdentifier</key>            <string>$BUNDLE_ID</string>
-              <key>CFBundleVersion</key>               <string>$SAFE_VERSION</string>
-              <key>CFBundleShortVersionString</key>    <string>1.0.0</string>
+              <key>CFBundleVersion</key>               <string>$BUILD_VERSION</string>
+              <key>CFBundleShortVersionString</key>    <string>$SHORT_VERSION</string>
               <key>CFBundlePackageType</key>           <string>APPL</string>
               <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
               <key>LSMinimumSystemVersion</key>        <string>13.0</string>
@@ -189,13 +218,55 @@ jobs:
             SanhaiMac.dmg
 
       - name: 上传直链（仅 tag 构建）
-        # 只有打 tag 才往 Releases 里放东西。
-        # 这样 master/main 的日常构建不会污染发布记录。
+        # 只有打 tag 才往 Releases 里放东西。这样 main 的日常构建不会污染发布记录。
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             .build-app/SanhaiMac-macos.zip
             SanhaiMac.dmg
+          # ⚠️ draft: true —— 草稿不会让别人看到，确认没问题再手动发布。
+          #    这个包是**未签名**的，直接公开发布等于让每个下载的人
+          #    都撞一次 Gatekeeper 的墙。草稿期间只给内部验证用。
           draft: true
+          name: SanhaiMac ${{ github.ref_name }}（未签名内测版）
+          # 正文的第一段必须先讲"怎么打开"，而不是讲这是什么 ——
+          # 用户是从 Release 页面直接下载的，不会先去读 README。
+          # 不先说清楚的话，第一次双击打不开就直接放弃了。
+          body: |
+            ## ⚠️ 这是**未签名**版本，首次打开需要手动放行
+
+            苹果要求应用经过签名和公证才允许直接打开，本项目目前没有开发者账号，
+            所以产出的 app 未经签名。macOS 的 Gatekeeper 会拦下它 —— **双击是打不开的**。
+
+            **放行方法（任选一种）：**
+
+            1. 在「访达」里**右键**点 `SanhaiMac.app` → 选「打开」→ 弹窗里再点「打开」
+            2. 打开「系统设置 → 隐私与安全性」，往下翻到被阻止的提示，点「仍要打开」
+            3. 选中 app 按 `⌘I`，在「隐私与安全性」一栏点「仍要打开」
+
+            建议下载 **zip** 而不是 dmg：macOS 解压 zip 会自动去掉隔离属性，
+            装起来更顺畅。把解压出来的 `SanhaiMac.app` 拖进「应用程序」即可。
+
+            ---
+
+            ### 这是什么
+
+            SanhaiOJ（Hydro 内核，https://www.myijk.com）的 macOS 原生客户端。
+            需要 macOS 13 或更高版本。当前只有两个页面：题库、评测。
+
+            ### 首次使用
+
+            1. 打开左侧「设置」
+            2. 「站点」填站点根地址：填 `https://www.myijk.com` 这种根地址，**不要**带 `/client-api` 之类的路径
+            3. 「令牌」填 Bearer 令牌；没有的话可以用同一页的「用账号密码换令牌」自动获取
+            4. 点「测试」，看到「连接成功」再走
+            5. 回到「题库」「评测」页，用工具栏的刷新按钮（`⌘R`）加载数据
+
+            ### 已知问题
+
+            * 令牌默认存进系统钥匙串。如果钥匙串不可用，可在设置页开启
+              「允许明文文件保存（调试用）」——令牌等同于账号密码，
+              请不要在长期使用的机器上长期开启该选项。
+            * 图标是系统默认图标。
           generate_release_notes: true

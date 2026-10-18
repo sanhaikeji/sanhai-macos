@@ -97,9 +97,35 @@ struct Problem: Identifiable, Hashable, Codable {
             ?? (try? alt?.decode(String.self, forKey: .name))
             ?? "(无标题)"
 
-        difficulty = (try? c.decode(Int.self, forKey: .difficulty)) ?? 0
+        difficulty = Problem.decodeDifficulty(from: c, key: .difficulty)
         url = try? c.decodeIfPresent(String.self, forKey: .url)
         hidden = try? c.decodeIfPresent(Bool.self, forKey: .hidden)
+    }
+
+    /// 难度的容错解码。
+    ///
+    /// 站点返回的 `difficulty` 实测过三种形态：数字 `5`、字符串 `"5"`、以及缺失/null。
+    /// 之前只写了 `try? c.decode(Int.self, ...)`，
+    /// 于是字符串形态会静默掉进 `?? 0`，而 **0 的语义是"未评定"** ——
+    /// 结果是"有难度的题"被显示成"未评定"。这是把"解析失败"伪装成了"没有数据"，
+    /// 比直接报错更难发现，所以字符串这条必须补上。
+    ///
+    /// 另外站点还可能返回 `"easy"` / `"hard"` 这类文字，
+    /// 那种情况也一律当作 0（未评定）—— 我们没有权威的映射表，
+    /// 硬编一个映射等于自己发明数据。
+    private static func decodeDifficulty(
+        from c: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) -> Int {
+        if let i = try? c.decode(Int.self, forKey: key) {
+            return i
+        }
+        if let s = try? c.decode(String.self, forKey: key) {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let i = Int(t) { return i }      // "5" → 5
+            if let f = Double(t) { return Int(f) } // "5.0" → 5
+        }
+        return 0                               // 缺失 / null / 无法识别 → 未评定
     }
 
     private enum CodingKeys: String, CodingKey {
