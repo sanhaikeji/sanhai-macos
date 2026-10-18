@@ -1,0 +1,32 @@
+# ── 构建产物一律不进仓库 ──
+# 这个仓库放在 OneDrive 同步目录下。历史上因为在项目目录里堆了多份完整拷贝，
+# 把同步拖死、构建卡死十几分钟。这里把所有可能的产物路径都排掉，
+# 避免任何人（或任何工具）不小心把大文件写进同步目录。
+.build/
+.build-app/
+.build-dmg/
+DerivedData/
+*.o
+*.dSYM/
+
+# 打包出来的 app / 镜像
+*.app/
+*.dmg
+*.zip
+
+# Xcode（本工程不用 xcodeproj，但这几个文件容易被顺手动出来）
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+
+# macOS 系统文件
+.DS_Store
+._*
+
+# SwiftPM
+.swiftpm/
+Package.resolved
+
+# 令牌明文文件 —— 绝不能进仓库
+token.plist
+*.token

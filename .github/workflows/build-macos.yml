@@ -1,0 +1,193 @@
+name: Build macOS App
+
+# 触发条件：
+#   - 推 main
+#   - 打 v* tag（打 tag 时额外产出带版本号的产物）
+#   - 手动触发（workflow_dispatch），方便"只想验证能不能编过"
+# 不在 PR 上构建：macOS runner 一分钟起步，PR 上每次提交都跑一遍太贵；
+# 真需要验证 PR 的话，手动触发一次即可。
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+concurrency:
+  # 同一个分支的并发提交只留最新一次构建，早先的直接取消，
+  # 省下 macOS runner 的排队时间（macOS runner 比 Linux 贵得多）
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # 必须用 macOS runner —— Swift 工具链只在 macOS/Linux 上有，
+    # Windows runner 装不了，所以"在 Windows 上开发、云端编译"这条路必须靠 macOS runner。
+    runs-on: macos-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 读出 Swift 版本
+        run: swift --version
+
+      # ---- 缓存 .build ----
+      # 这一步是整个流水线里最值钱的几行。
+      # Swift 的增量编译缓存放在 .build/ 里，冷启动一次全量编译要好几分钟；
+      # 不缓存的话每次提交都要重新等，而且 macOS runner 排队本身就慢，
+      # 叠加起来体验非常差（本地等几分钟 + CI 等十几分钟）。
+      # 缓存 key 里带上 Package.swift 的哈希：依赖变了就自动失效，
+      # 避免用旧依赖的产物编译出错误的结果。
+      - name: 缓存 Swift 构建目录
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: 编译（release）
+        run: swift build -c release --disable-sandbox
+        env:
+          # 告诉 SwiftPM 关掉自己那层沙箱：runner 上的临时目录权限行为
+          # 在 CI 里偶尔会让 sandbox 报错，--disable-sandbox 是 CI 环境的常规做法。
+          SWIFTPM_DISABLE_SANDBOX: "1"
+
+      # ---- 组 .app bundle ----
+      # SwiftPM 只产出一个裸可执行文件，没有 Info.plist、没有图标，
+      # 直接双击是不能当应用打开的（macOS 认的是 bundle 结构）。
+      # 所以这里手工组装：把二进制塞进 Contents/MacOS/，写一份 Info.plist。
+      # 用「bundle id + 版本号」而不是硬编码，保证多分支构建的产物彼此独立，
+      # 装多个版本时会共存而不是互相覆盖。
+      - name: 组装 .app bundle
+        run: |
+          set -euo pipefail
+
+          APP_NAME="SanhaiMac"
+          BUNDLE_ID="com.sanhai.mac.client"
+          # 版本号取 tag（没有 tag 就用提交号），避免每次构建都叫 1.0
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          # 把非法字符换成横线，否则 Info.plist 里的 CFBundleShortVersionString 会不合规
+          SAFE_VERSION="$(echo "$VERSION" | tr -cd '[:alnum:].-')"
+          BUILD_DIR="$PWD/.build-app"
+          APP="$BUILD_DIR/$APP_NAME.app"
+
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+          cp ".build/release/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
+          chmod +x "$APP/Contents/MacOS/$APP_NAME"
+
+          # Info.plist：
+          #  CFBundleExecutable —— 必须和 MacOS/ 里的文件名一致
+          #  LSMinimumSystemVersion —— 低于这个版本的 macOS 不给装（工程里定的是 13）
+          #  LSUIElement 不设 —— 客户端要出现在 Dock 和程序坞里
+          #  NSHighResolutionCapable —— 必须为 true，否则界面在 Retina 上是模糊的
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleName</key>                  <string>$APP_NAME</string>
+              <key>CFBundleDisplayName</key>           <string>SanhaiOJ 客户端</string>
+              <key>CFBundleExecutable</key>            <string>$APP_NAME</string>
+              <key>CFBundleIdentifier</key>            <string>$BUNDLE_ID</string>
+              <key>CFBundleVersion</key>               <string>$SAFE_VERSION</string>
+              <key>CFBundleShortVersionString</key>    <string>1.0.0</string>
+              <key>CFBundlePackageType</key>           <string>APPL</string>
+              <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
+              <key>LSMinimumSystemVersion</key>        <string>13.0</string>
+              <key>NSHighResolutionCapable</key>       <true/>
+              <key>NSHumanReadableCopyright</key>      <string>SanhaiOJ</string>
+              <key>CFBundleDevelopmentRegion</key>     <string>zh_CN</string>
+              <key>NSAppTransportSecurity</key>
+              <dict>
+                  <!-- 只允许 HTTPS。站点是 https 的，
+                       显式关掉「允许任意 HTTP」比依赖默认值更清楚。 -->
+                  <key>NSAllowsArbitraryLoads</key><false/>
+              </dict>
+          </dict>
+          </plist>
+          PLIST
+
+          # 校验 bundle 结构：这一步很便宜，但能在打包阶段就发现
+          # 「二进制没复制进去」「plist 写坏了」这类问题，
+          # 比等到 artifact 下载下来双击打不开再回头查快得多。
+          echo "校验 bundle…"
+          test -x "$APP/Contents/MacOS/$APP_NAME"
+          plutil -lint "$APP/Contents/Info.plist"
+
+          echo "$APP" >> "$GITHUB_OUTPUT"
+
+      - name: 压 zip
+        # zip 给"手动安装"用：解压后把 .app 拖进「应用程序」就能用。
+        # macOS 解压 zip 会自动去掉隔离属性（quarantine），
+        # 所以从 zip 装的未签名 app 比直接下 dmg 顺畅一些。
+        run: |
+          set -euo pipefail
+          cd .build-app
+          # -x 去掉 macOS 特有的 __MACOSX 垃圾目录
+          ditto -c -k --keepParent "SanhaiMac.app" "SanhaiMac-macos.zip"
+
+      - name: 做 dmg
+        # dmg 是个带背景图和图标拖拽区的磁盘镜像，双击会挂载。
+        # 只用系统自带的 hdiutil，不装任何第三方打包工具 —— 一个 dmg 不值得引入依赖。
+        run: |
+          set -euo pipefail
+          STAGE="$PWD/.build-dmg"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp -R ".build-app/SanhaiMac.app" "$STAGE/"
+          # 做成和 /Applications 之间有软链接的布局：用户一拖就是"安装"
+          ln -s /Applications "$STAGE/Applications"
+
+          hdiutil create \
+            -volname "SanhaiMac" \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "SanhaiMac.dmg"
+
+          hdiutil verify "SanhaiMac.dmg"
+
+      # ------------------------------------------------------------------
+      # 将来有 Apple 开发者账号时，在这里插入两步签名 + 公证：
+      #
+      #   1) 签名（本地/临时身份也行，公证才必须用 Developer ID）：
+      #      codesign --force --deep --options runtime \
+      #               --sign "Developer ID Application: XXX (TEAMID)" \
+      #               --timestamp "http://timestamp.apple.com/tsapple" \
+      #               "SanhaiMac.app"
+      #
+      #   2) 公证（需要 Apple ID App 专用密码作为 keychain profile）：
+      #      xcrun notarytool submit "SanhaiMac.dmg" \
+      #             --keychain-profile "AC_PASSWORD" \
+      #             --wait
+      #      xcrun stapler staple "SanhaiMac.dmg"
+      #
+      # 账号存在 GitHub Secrets 里：AC_KEYCHAIN_PROFILE / AC_APPLE_ID / AC_TEAM_ID 等。
+      # 现在用户没有开发者账号，所以这两步整个省略 —— 未签名产物双击会被 Gatekeeper 拦，
+      # 绕过方法写在 README 里。
+      # ------------------------------------------------------------------
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: SanhaiMac-macos
+          # 不覆盖同名产物，方便一次运行出多个包（比如 tag 版本 + dev 版本）
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            .build-app/SanhaiMac-macos.zip
+            SanhaiMac.dmg
+
+      - name: 上传直链（仅 tag 构建）
+        # 只有打 tag 才往 Releases 里放东西。
+        # 这样 master/main 的日常构建不会污染发布记录。
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            .build-app/SanhaiMac-macos.zip
+            SanhaiMac.dmg
+          draft: true
+          generate_release_notes: true
